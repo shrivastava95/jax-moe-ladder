@@ -4,7 +4,7 @@ Minimal JAX grokking setup for modular addition.
 Builds from scratch:
 - Linear layer
 - MLP
-- AdamW
+- Optax AdamW/SGD optimizer
 - Cross-entropy loss
 - JIT train/eval steps
 - Train/test accuracy + loss plot
@@ -17,6 +17,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import matplotlib.pyplot as plt
+from optax import adamw, apply_updates, sgd
 from tqdm import tqdm
 
 
@@ -24,17 +25,23 @@ from tqdm import tqdm
 # Config
 # -----------------------------
 P = 113
-TEST_FRAC = 0.5
+TEST_FRAC = 0.2
 NUM_EPOCHS = 1000
 SEED = 0
 
 EMBED_DIM = 128
 MLP_IN_DIM = 2 * EMBED_DIM
-MLP_HIDDEN_DIM = 1024
+MLP_HIDDEN_DIM = 256
 MLP_OUT_DIM = P
 
-LR = 1e-3
+OPTIMIZER_NAME = "sgd"
+ADAMW_LR = 1e-3
+ADAM_BETA1 = 0.9
+ADAM_BETA2 = 0.999
+ADAM_EPS = 1e-8
 WEIGHT_DECAY = 1.0
+SGD_LR = 3.0
+SGD_MOMENTUM = 0.9
 PLOT_PATH = Path("jax_modular_addition_training.png")
 
 
@@ -81,55 +88,23 @@ def get_input_embeddings(embed_params, x):
 
 
 # -----------------------------
-# Optimizer: AdamW
+# Optimizer
 # -----------------------------
-def zeros_like_tree(tree):
-    return jax.tree.map(jnp.zeros_like, tree)
+def make_optimizer(name=OPTIMIZER_NAME):
+    if name == "adamw":
+        return adamw(
+            learning_rate=ADAMW_LR,
+            b1=ADAM_BETA1,
+            b2=ADAM_BETA2,
+            eps=ADAM_EPS,
+            weight_decay=WEIGHT_DECAY,
+        )
+    if name == "sgd":
+        return sgd(learning_rate=SGD_LR, momentum=SGD_MOMENTUM)
+    raise ValueError(f"unknown optimizer: {name}")
 
 
-def init_adamw_state(params):
-    return {
-        "step": jnp.array(0),
-        "m": zeros_like_tree(params),
-        "v": zeros_like_tree(params),
-    }
-
-
-def adamw_update(
-    params,
-    grads,
-    opt_state,
-    lr=LR,
-    beta1=0.9,
-    beta2=0.999,
-    eps=1e-8,
-    wd=WEIGHT_DECAY,
-):
-    step = opt_state["step"] + 1
-
-    m = jax.tree.map(
-        lambda old_m, g: beta1 * old_m + (1.0 - beta1) * g,
-        opt_state["m"],
-        grads,
-    )
-    v = jax.tree.map(
-        lambda old_v, g: beta2 * old_v + (1.0 - beta2) * (g * g),
-        opt_state["v"],
-        grads,
-    )
-
-    m_hat = jax.tree.map(lambda value: value / (1.0 - beta1**step), m)
-    v_hat = jax.tree.map(lambda value: value / (1.0 - beta2**step), v)
-
-    new_params = jax.tree.map(
-        lambda p, mh, vh: p - lr * (mh / (jnp.sqrt(vh) + eps) + wd * p),
-        params,
-        m_hat,
-        v_hat,
-    )
-
-    new_opt_state = {"step": step, "m": m, "v": v}
-    return new_params, new_opt_state
+optimizer = make_optimizer()
 
 
 # -----------------------------
@@ -192,7 +167,8 @@ def accuracy(params, batch):
 @jax.jit
 def train_step(params, opt_state, batch):
     loss, grads = jax.value_and_grad(loss_fn)(params, batch)
-    params, opt_state = adamw_update(params, grads, opt_state)
+    updates, opt_state = optimizer.update(grads, opt_state, params)
+    params = apply_updates(params, updates)
     return params, opt_state, loss
 
 
@@ -232,7 +208,7 @@ def main():
 
     data_train, data_test = make_modular_addition_data(k_data)
     params = init_model(k_model)
-    opt_state = init_adamw_state(params)
+    opt_state = optimizer.init(params)
 
     steps = []
     train_losses = []
